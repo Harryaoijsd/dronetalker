@@ -3,13 +3,12 @@ from flask_cors import CORS
 import sqlite3
 import time
 import os
-import math
 
 APP_TOKEN = os.environ.get("APP_TOKEN", "CHANGE_ME_LONG_RANDOM_TOKEN")
 DB_PATH = os.environ.get("DB_PATH", "targets.db")
 
-MAX_AGE_SECONDS = int(os.environ.get("MAX_AGE_SECONDS", "60"))   # Latest target valid for 60s
-MAX_ACCURACY_M = float(os.environ.get("MAX_ACCURACY_M", "50"))   # Reject very inaccurate GPS (>50m)
+MAX_AGE_SECONDS = int(os.environ.get("MAX_AGE_SECONDS", "60"))
+MAX_ACCURACY_M = float(os.environ.get("MAX_ACCURACY_M", "50"))
 
 app = Flask(__name__)
 CORS(app)
@@ -27,8 +26,11 @@ def init_db():
             request_id TEXT
         )
     """)
-    # Ensure row exists
-    cur.execute("INSERT OR IGNORE INTO latest_target (id, lat, lon, accuracy, created_at, request_id) VALUES (1, NULL, NULL, NULL, NULL, NULL)")
+    cur.execute("""
+        INSERT OR IGNORE INTO latest_target
+        (id, lat, lon, accuracy, created_at, request_id)
+        VALUES (1, NULL, NULL, NULL, NULL, NULL)
+    """)
     conn.commit()
     conn.close()
 
@@ -46,11 +48,15 @@ def set_latest(lat, lon, accuracy, request_id):
 def get_latest():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT lat, lon, accuracy, created_at, request_id FROM latest_target WHERE id = 1")
+    cur.execute("""
+        SELECT lat, lon, accuracy, created_at, request_id
+        FROM latest_target WHERE id = 1
+    """)
     row = cur.fetchone()
     conn.close()
     if not row:
         return None
+
     lat, lon, accuracy, created_at, request_id = row
     return {
         "lat": lat,
@@ -61,9 +67,11 @@ def get_latest():
     }
 
 def valid_lat_lon(lat, lon):
-    if lat is None or lon is None:
-        return False
-    return -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
+    return lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180
+
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"ok": True, "service": "dronetalker"})
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -71,36 +79,33 @@ def health():
 
 @app.route("/go", methods=["POST"])
 def go():
-    # Token check
     token = request.headers.get("X-APP-TOKEN", "")
     if token != APP_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
     data = request.get_json(silent=True) or {}
-    lat = data.get("lat")
-    lon = data.get("lon")
-    accuracy = data.get("accuracy")
-    request_id = data.get("request_id")
 
-    # Basic validation
     try:
-        lat = float(lat)
-        lon = float(lon)
-        accuracy = float(accuracy) if accuracy is not None else None
+        lat = float(data.get("lat"))
+        lon = float(data.get("lon"))
+        accuracy = float(data.get("accuracy"))
+        request_id = str(data.get("request_id"))
     except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "invalid lat/lon/accuracy"}), 400
+        return jsonify({"ok": False, "error": "invalid data"}), 400
 
     if not valid_lat_lon(lat, lon):
         return jsonify({"ok": False, "error": "lat/lon out of range"}), 400
 
-    if accuracy is None:
-        return jsonify({"ok": False, "error": "accuracy required"}), 400
-
     if accuracy > MAX_ACCURACY_M:
         return jsonify({"ok": False, "error": f"gps too inaccurate ({accuracy:.1f}m)"}), 400
 
-    if not request_id or not isinstance(request_id, str) or len(request_id) > 80:
-        return jsonify({"ok": False, "error": "request_id required (string, <=80 chars)"}), 400
+    # 👉 PRINT GPS WHEN RECEIVED
+    print("📍 NEW TARGET RECEIVED")
+    print(f"    Lat: {lat}")
+    print(f"    Lon: {lon}")
+    print(f"    Accuracy: {accuracy:.1f} m")
+    print(f"    Request ID: {request_id}")
+    print("")
 
     set_latest(lat, lon, accuracy, request_id)
 
@@ -122,17 +127,27 @@ def latest():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
     latest = get_latest()
-    if not latest or latest["lat"] is None or latest["lon"] is None:
-        return jsonify({"ok": False, "error": "no target set"}), 404
+    if not latest or latest["lat"] is None:
+        return jsonify({"ok": False, "error": "no target"}), 404
 
-    age = int(time.time()) - int(latest["created_at"] or 0)
+    age = int(time.time()) - int(latest["created_at"])
     if age > MAX_AGE_SECONDS:
-        return jsonify({"ok": False, "error": f"target stale ({age}s old)"}), 410
+        return jsonify({"ok": False, "error": "target stale"}), 410
 
-    return jsonify({"ok": True, "target": latest, "age_seconds": age})
+    # 👉 PRINT GPS WHEN READ
+    print("📡 TARGET READ BY CLIENT")
+    print(f"    Lat: {latest['lat']}")
+    print(f"    Lon: {latest['lon']}")
+    print(f"    Accuracy: {latest['accuracy']:.1f} m")
+    print(f"    Age: {age} s")
+    print("")
+
+    return jsonify({
+        "ok": True,
+        "target": latest,
+        "age_seconds": age
+    })
 
 if __name__ == "__main__":
     init_db()
-    # Use 0.0.0.0 so your phone can reach it on your network.
-    # For public internet, put it behind HTTPS (ngrok / cloud / reverse proxy).
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000)
