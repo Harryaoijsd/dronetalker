@@ -3,16 +3,35 @@ from flask_cors import CORS
 import sqlite3
 import time
 import os
+import logging
 
-APP_TOKEN = os.environ.get("APP_TOKEN", "CHANGE_ME_LONG_RANDOM_TOKEN")
+# --------------------
+# CONFIG
+# --------------------
+APP_TOKEN = os.environ.get("APP_TOKEN", "CHANGE_ME")
 DB_PATH = os.environ.get("DB_PATH", "targets.db")
-
 MAX_AGE_SECONDS = int(os.environ.get("MAX_AGE_SECONDS", "60"))
 MAX_ACCURACY_M = float(os.environ.get("MAX_ACCURACY_M", "50"))
 
+# --------------------
+# LOGGING (THIS IS THE KEY BIT)
+# --------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    force=True
+)
+log = logging.getLogger("dronetalker")
+
+# --------------------
+# APP
+# --------------------
 app = Flask(__name__)
 CORS(app)
 
+# --------------------
+# DATABASE
+# --------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -33,6 +52,7 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    log.info("Database initialised")
 
 def set_latest(lat, lon, accuracy, request_id):
     conn = sqlite3.connect(DB_PATH)
@@ -69,6 +89,9 @@ def get_latest():
 def valid_lat_lon(lat, lon):
     return lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180
 
+# --------------------
+# ROUTES
+# --------------------
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({"ok": True, "service": "dronetalker"})
@@ -81,6 +104,7 @@ def health():
 def go():
     token = request.headers.get("X-APP-TOKEN", "")
     if token != APP_TOKEN:
+        log.warning("Unauthorized POST /go")
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
     data = request.get_json(silent=True) or {}
@@ -91,21 +115,22 @@ def go():
         accuracy = float(data.get("accuracy"))
         request_id = str(data.get("request_id"))
     except (TypeError, ValueError):
+        log.warning("Invalid payload received: %s", data)
         return jsonify({"ok": False, "error": "invalid data"}), 400
 
     if not valid_lat_lon(lat, lon):
+        log.warning("Lat/Lon out of range: lat=%s lon=%s", lat, lon)
         return jsonify({"ok": False, "error": "lat/lon out of range"}), 400
 
     if accuracy > MAX_ACCURACY_M:
+        log.warning("GPS accuracy too poor: %.1fm", accuracy)
         return jsonify({"ok": False, "error": f"gps too inaccurate ({accuracy:.1f}m)"}), 400
 
-    # 👉 PRINT GPS WHEN RECEIVED
-    print("📍 NEW TARGET RECEIVED")
-    print(f"    Lat: {lat}")
-    print(f"    Lon: {lon}")
-    print(f"    Accuracy: {accuracy:.1f} m")
-    print(f"    Request ID: {request_id}")
-    print("")
+    # 🔥 THIS WILL 100% SHOW IN RENDER LOGS
+    log.info(
+        "NEW TARGET | lat=%.6f lon=%.6f acc=%.1fm request_id=%s",
+        lat, lon, accuracy, request_id
+    )
 
     set_latest(lat, lon, accuracy, request_id)
 
@@ -134,13 +159,10 @@ def latest():
     if age > MAX_AGE_SECONDS:
         return jsonify({"ok": False, "error": "target stale"}), 410
 
-    # 👉 PRINT GPS WHEN READ
-    print("📡 TARGET READ BY CLIENT")
-    print(f"    Lat: {latest['lat']}")
-    print(f"    Lon: {latest['lon']}")
-    print(f"    Accuracy: {latest['accuracy']:.1f} m")
-    print(f"    Age: {age} s")
-    print("")
+    log.info(
+        "TARGET READ | lat=%.6f lon=%.6f acc=%.1fm age=%ss",
+        latest["lat"], latest["lon"], latest["accuracy"], age
+    )
 
     return jsonify({
         "ok": True,
@@ -148,6 +170,9 @@ def latest():
         "age_seconds": age
     })
 
+# --------------------
+# STARTUP
+# --------------------
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
